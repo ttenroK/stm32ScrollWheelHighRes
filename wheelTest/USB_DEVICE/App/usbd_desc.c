@@ -62,10 +62,10 @@
   * @{
   */
 
-#define USBD_VID     1155//1133//1155
+#define USBD_VID     1155
 #define USBD_LANGID_STRING     1031
-#define USBD_MANUFACTURER_STRING     "Joni"
-#define USBD_PID_FS     1234//22315//50489//16514//22315
+#define USBD_MANUFACTURER_STRING     "ttenrok"
+#define USBD_PID_FS     1234
 #define USBD_PRODUCT_STRING_FS     "Scroll Wheel"
 #define USBD_CONFIGURATION_STRING_FS     "HID Config"
 #define USBD_INTERFACE_STRING_FS     "HID Interface"
