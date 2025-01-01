@@ -24,12 +24,19 @@
 /* USER CODE BEGIN Includes */
 #include "as5600.h"
 #include "stdbool.h"
+#include "usbd_hid.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 #define WHEEL_STEPSIZE 2
-#define MAIN_CYLCE_TIME_MS 1
+#define MAIN_CYLCE_TIME_MS 10
+
+// Inline macro for setting button bits
+#define MUTE_BUTTON(x) 			x = 0x4
+#define VOLUME_UP_BUTTON(x) 	x = 0x200
+#define VOLUME_DOWN_BUTTON(x) 	x = 0x400
+
 typedef struct __attribute__((__packed__)) {
 	uint8_t reportId;
 	uint8_t buttons;
@@ -42,6 +49,26 @@ typedef struct __attribute__((__packed__)) {
 	int8_t mediaControlButtons;
 } mouseReport;
 
+struct __attribute__((__packed__)) volumeControlReport {
+	uint8_t reportId;
+	uint16_t volumeControlButtons;
+
+} volumeControlReportContainer, lastVolumeControlReportContainer;
+
+struct __attribute__((__packed__)) mediaControlReport {
+	uint8_t reportId;
+
+	unsigned int playButton : 1;
+	unsigned int PauseButton : 1;
+	unsigned int recordButton : 1;
+	unsigned int fastForwardButton : 1;
+	unsigned int rewindButton : 1;
+	unsigned int scanNextTrackButton : 1;
+	unsigned int scanPreviousTrackButton : 1;
+	unsigned int stopButton : 1;
+
+} mediaControlReportContainer, lastMediaControlReportContainer;
+
 struct Encoder {
 	uint16_t rawAngle;
 	int16_t turnCounter;
@@ -50,7 +77,8 @@ struct Encoder {
 	int16_t relativeChangeToProcessedPosition;
 	int16_t processedAngle;
 	uint32_t positionTime;
-	int16_t rotationSpeed;
+	uint32_t deltaTime;
+	int32_t rotationSpeed;
 	bool invertDirection;
 } encoder, lastEncoderState;
 
@@ -59,11 +87,8 @@ enum Modes {
 	mediaControl,
 } mode;
 
-int32_t rawAngle = 0;
-uint16_t unprocessedDegrees = 0;
-uint16_t lastProcessedAngle = 0;
-uint8_t buf[12] = {0};
 uint32_t timeLastCycle;
+int16_t pendingVolumeSteps = 0;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -94,6 +119,8 @@ static void MX_I2C1_Init(void);
 static void MX_NVIC_Init(void);
 /* USER CODE BEGIN PFP */
 void handleEncoder(AS5600_TypeDef *a);
+void handleScrolling(void);
+void handleMediaControl(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -140,11 +167,21 @@ int main(void)
   AS5600_TypeDef *a = AS5600_New();
   a->i2cHandle = &hi2c1;
   a->i2cAddr = 0x36 << 1;
-  mouseReportContainer.reportId = 0x01;
+  mouseReportContainer.reportId = REPORT_ID_MOUSE;
+  volumeControlReportContainer.reportId = REPORT_ID_VOLUME_CTRL;
+  mediaControlReportContainer.reportId = REPORT_ID_MEDIA_CTRL;
+
+//  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*) &volumeControlReportContainer, 2);
+//  USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*) &mediaControlReportContainer, 2);
+
+
+//  a->Hysteresis = AS5600_HYSTERESIS_3LSB;
+//  a->FastFilterThreshold = AS5600_FAST_FILTER_7LSB;
 
 	// Read angular measurements
 	AS5600_Init(a);
 	encoder.invertDirection = true;
+//	mode = mediaControl;
 
   /* USER CODE END 2 */
 
@@ -156,36 +193,13 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-		if (HAL_GetTick() - timeLastCycle > MAIN_CYLCE_TIME_MS) {
-			//AS5600_GetAngle(a, &angle);
+		if (HAL_GetTick() - timeLastCycle > HID_FS_BINTERVAL) { //Only call method every 10ms, because host only requests data every 10ms
 			handleEncoder(a);
+			if (mode == scroll)
+				handleScrolling();
+			else if (mode == mediaControl)
+				handleMediaControl();
 
-			if (abs(encoder.relativeChangeToProcessedPosition) > 2) {
-				mouseReportContainer.wheel =
-						encoder.relativeChangeToProcessedPosition
-								* WHEEL_STEPSIZE
-								* abs(encoder.rotationSpeed);
-				if (encoder.invertDirection)
-					mouseReportContainer.wheel *= -1;
-
-				encoder.processedAngle = encoder.angle;
-			} else {
-				mouseReportContainer.wheel = 0;
-			}
-			if (encoder.positionTime != lastEncoderState.positionTime)
-				encoder.rotationSpeed =
-						encoder.relativeChangeToProcessedPosition
-								/ (encoder.positionTime
-										- lastEncoderState.positionTime);
-
-
-
-			if (mouseReportContainer.wheel != 0
-					|| lastMouseReportContainer.wheel != 0)
-				USBD_HID_SendReport(&hUsbDeviceFS,
-						(uint8_t*) &mouseReportContainer, 6);
-
-			lastMouseReportContainer = mouseReportContainer;
 			lastEncoderState = encoder;
 			timeLastCycle = HAL_GetTick();
 		}
@@ -328,15 +342,80 @@ void handleEncoder(AS5600_TypeDef *a)
 {
 	AS5600_GetAngle(a, &encoder.rawAngle);
 
+	// Handle overflows
 	if (encoder.rawAngle < 0xFFF/4 && lastEncoderState.rawAngle > 3*0xFFF/4)
 		encoder.turnCounter ++;
 	else if (encoder.rawAngle > 3*0xFFF/4 && lastEncoderState.rawAngle < 0xFFF/4)
 		encoder.turnCounter --;
 
+	// Calculate multiturn encoder position
 	encoder.angle = encoder.turnCounter * 0xFFF + encoder.rawAngle;
+
+	// Calculate difference to last sampled position
 	encoder.relativeChange = lastEncoderState.angle - encoder.angle;
-	encoder.relativeChangeToProcessedPosition = encoder.angle - encoder.processedAngle;
+	encoder.relativeChangeToProcessedPosition = encoder.angle
+			- encoder.processedAngle;
 	encoder.positionTime = HAL_GetTick();
+	encoder.rotationSpeed = (2*encoder.relativeChangeToProcessedPosition)
+			/ (int16_t) (encoder.positionTime - lastEncoderState.positionTime);
+
+	encoder.deltaTime = encoder.positionTime - lastEncoderState.positionTime;
+}
+
+
+void handleScrolling(void)
+{
+	if (abs(encoder.relativeChangeToProcessedPosition) > 1) {
+		mouseReportContainer.wheel = encoder.relativeChangeToProcessedPosition; //encoder.relativeChangeToProcessedPosition
+				//* WHEEL_STEPSIZE * ACCELERATION_FACTOR * abs(encoder.rotationSpeed);
+		if (encoder.invertDirection)
+			mouseReportContainer.wheel *= -1;
+
+		encoder.processedAngle = encoder.angle;
+
+	} else {
+		mouseReportContainer.wheel = 0;
+	}
+
+	if (mouseReportContainer.wheel != 0 || lastMouseReportContainer.wheel != 0)
+		USBD_HID_SendReport(&hUsbDeviceFS, (uint8_t*) &mouseReportContainer, 6);
+
+	lastMouseReportContainer = mouseReportContainer;
+
+}
+
+void handleMediaControl(void)
+{
+	//TODO discrete steps instead of incremental.
+	if (abs(encoder.relativeChangeToProcessedPosition) > 0xFFF/100){
+		pendingVolumeSteps += encoder.relativeChangeToProcessedPosition;
+		encoder.processedAngle = encoder.angle;
+	}
+
+	if (pendingVolumeSteps != 0)
+	{
+		if (pendingVolumeSteps > 0)
+		{
+			VOLUME_UP_BUTTON(volumeControlReportContainer.volumeControlButtons);
+			pendingVolumeSteps = 0;
+		}
+		else if (pendingVolumeSteps < 0)
+		{
+			VOLUME_DOWN_BUTTON(volumeControlReportContainer.volumeControlButtons);
+			pendingVolumeSteps = 0;
+		}
+	}
+	else
+	{
+		volumeControlReportContainer.volumeControlButtons = 0x00;
+	}
+
+
+	USBD_HID_SendReport(&hUsbDeviceFS,
+			(uint8_t*) &volumeControlReportContainer, 3);
+
+
+
 }
 
 /* USER CODE END 4 */

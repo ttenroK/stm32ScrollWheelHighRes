@@ -47,7 +47,13 @@ extern "C" {
 
 #define USB_HID_CONFIG_DESC_SIZ                    34U
 #define USB_HID_DESC_SIZ                           9U
-#define HID_MOUSE_REPORT_DESC_SIZE                 141U//129U//114U//89U
+#define HID_MOUSE_REPORT_DESC_SIZE                 133U
+
+// Custom defines for report IDs
+#define REPORT_ID_MOUSE 		0x01
+#define REPORT_ID_VOLUME_CTRL 	0x02
+#define REPORT_ID_MEDIA_CTRL 	0x03
+
 
 #define HID_DESCRIPTOR_TYPE                        0x21U
 #define HID_REPORT_DESC                            0x22U
